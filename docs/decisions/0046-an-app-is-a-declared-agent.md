@@ -126,15 +126,26 @@ the log; nobody sees an app in a base it was not granted to.
 ## Dead ends
 
 **A code sandbox as the first cut.** Letting people write code against the graph is the shape this
-was first asked in. It is refused for cut 1 and left open forever after. The reason is not
-security: it is that the enterprise team this product serves has nobody who will write a WASM
-component for a knowledge base, so the first release would ship an empty app center and the
-engineering would have gone into an execution boundary rather than into the thing people use. The
-seam is kept: a component tier would get exactly `dispatch` and `ToolCtx` as its host surface, so
-the boundary above is already the one it would have to pass through. If it comes it is Wasmtime
-and the component model — fuel-metered, memory-capped, no ambient network, no filesystem. A
-container runtime is refused separately: self-hosting promises one binary and a Postgres, and
-a privileged runtime is a different operational promise.
+was first asked in. It is refused for cut 1 and left open after. The reason is not security: the
+team this product serves has nobody who will write a component for a knowledge base in its first
+week, so the release would ship an empty app center and the engineering would have gone into an
+execution boundary instead of into the thing people use. The order WeKnora took is the evidence:
+custom agents — a prompt, a tool list, a knowledge base scope — shipped in 0.2.6 (2025-12), and the
+skill sandbox was the headline of 0.8.0 eight months later.
+
+When that tier comes, it is a `Sandbox` trait over a protocol with backends rather than an
+isolation mechanism written here. WeKnora runs one client protocol over three: Docker through the
+Engine API, E2B (hosted or self-hosted control plane) and Cube, with image, CPU, memory, TTL, DNS,
+templates and snapshots per configuration and a default-deny egress policy an admin sets per
+config. Two of their corrections are worth taking before making them: the host-process backend was
+removed outright and the Docker backend made opt-in, because a mounted `docker.sock` is host root;
+and every exec had to be moved off root to uid 1000 with symlink escapes out of the workspace
+closed. Whether a WebAssembly host serves instead turns on one question — a page computing over
+what the tools return fits inside one, and a skill that installs a Python package to produce a
+.docx needs an operating system, which is most of what a catalog fills up with.
+
+The seam is kept either way: a code tier gets exactly `dispatch` and `ToolCtx` as its host surface,
+so the boundary above is the one it has to pass through.
 
 **An app as a saved conversation.** Rerunning a saved chat would replay a resolved question — the
 entities it had already identified, the month it was asked in. An app carries its instructions and
@@ -197,3 +208,7 @@ own, which is the whole of what an external agent needs from this record.
   is not designed.
 - **An app calling an app.** Cheap to allow and hard to bound; left out until something asks.
 - **Events as a trigger**, together with 0034's rule-fires-an-action seam.
+- **Where a team meets an app.** This record gives an app a page inside the product. WeKnora's
+  equivalent surfaces are an embed widget with a domain allowlist and a rate limit, the IM channels,
+  and a scoped API key — the app center is where an app is administered and those are where it is
+  used. Which of them this product wants is not decided here; MCP is the one it already has.
