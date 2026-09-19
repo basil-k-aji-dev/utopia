@@ -2,7 +2,7 @@
 
 Records: [0042] (the loop), [0014] (MCP tools and scope), [0015] (`remember` and the nod), [0020]
 (the read contract), [0021] (rule tools), [0019] and [0022] (timed reads), [0035] (retrieval),
-[0011] and [0036] (mappings in the prompt), [0040] (origin in results).
+[0011] and [0036] (mappings in the prompt), [0040] (origin in results), [0046] (apps, proposed).
 
 ## What it does today
 
@@ -64,6 +64,9 @@ which #547 marks on the answer [0042].
 
 ## Proposed and not built
 
+- **Apps** are recorded and not built [0046]: a named configuration of this loop — instructions, a
+  tool list, pinned definitions, a clock, an output shape, an optional action — granted to a base,
+  run by a person or a schedule as the person themselves, one row per run.
 - A per-task model (`on_model_select`) and a chat model chosen per base [0042].
 - Retrieval that takes `at`; a versioned full-text index [0022, 0019].
 - The read-contract gaps: conflict and review state, chunk identity behind a quote [0020].
