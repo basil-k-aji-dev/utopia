@@ -125,27 +125,22 @@ the log; nobody sees an app in a base it was not granted to.
 
 ## Dead ends
 
-**A code sandbox as the first cut.** Letting people write code against the graph is the shape this
-was first asked in. It is refused for cut 1 and left open after. The reason is not security: the
-team this product serves has nobody who will write a component for a knowledge base in its first
-week, so the release would ship an empty app center and the engineering would have gone into an
-execution boundary instead of into the thing people use. The order WeKnora took is the evidence:
-custom agents — a prompt, a tool list, a knowledge base scope — shipped in 0.2.6 (2025-12), and the
-skill sandbox was the headline of 0.8.0 eight months later.
+**Code in this record.** An app someone writes code for is a second kind of thing and gets its own
+record (0047), because its criteria are different: a capability is an imported function rather than
+a tool name checked at run time, determinism is a requirement rather than a nicety, and the author
+is a coding agent rather than a person. What is settled here and carries over: the identity rule,
+the egress rule, the declared clock, the run row and the queue.
 
-When that tier comes, it is a `Sandbox` trait over a protocol with backends rather than an
-isolation mechanism written here. WeKnora runs one client protocol over three: Docker through the
-Engine API, E2B (hosted or self-hosted control plane) and Cube, with image, CPU, memory, TTL, DNS,
-templates and snapshots per configuration and a default-deny egress policy an admin sets per
-config. Two of their corrections are worth taking before making them: the host-process backend was
-removed outright and the Docker backend made opt-in, because a mounted `docker.sock` is host root;
-and every exec had to be moved off root to uid 1000 with symlink escapes out of the workspace
-closed. Whether a WebAssembly host serves instead turns on one question — a page computing over
-what the tools return fits inside one, and a skill that installs a Python package to produce a
-.docx needs an operating system, which is most of what a catalog fills up with.
-
-The seam is kept either way: a code tier gets exactly `dispatch` and `ToolCtx` as its host surface,
-so the boundary above is the one it has to pass through.
+**A container as the first backend for that tier.** Withdrawn the day it was written. It was
+argued from WeKnora, whose skills are written by people, installed from a catalog and assume a
+shell — so they need an operating system, and WeKnora pays for it (the host-process backend
+removed outright, the Docker backend made opt-in because a mounted `docker.sock` is host root,
+every exec moved off root to uid 1000, symlink escapes out of the workspace closed). A component
+this product's own coding agent writes against a typed interface has no such requirement, and the
+things a container costs — a daemon beside the binary, a hundred milliseconds of start-up per run,
+and an ambient clock, network and filesystem that make a re-parse non-reproducible — are all
+things this product would rather not pay. A container backend stays possible behind the same trait,
+off by default, for the customer who arrives holding a Python script.
 
 **An app as a saved conversation.** Rerunning a saved chat would replay a resolved question — the
 entities it had already identified, the month it was asked in. An app carries its instructions and
