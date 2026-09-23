@@ -495,17 +495,34 @@ impl LlmClient {
         if let Some(t) = temperature {
             body["temperature"] = json!(t);
         }
-        let resp = self
-            .request("/chat/completions")
-            .json(&body)
-            .send()
-            .await
-            .map_err(Unreachable)?;
-        let status = resp.status();
-        let retry_after = retry_after_of(resp.headers());
-        if !status.is_success() {
-            return Err(response_failure("LLM", status, retry_after, resp).await?);
-        }
+        // One retry, and only downwards: an endpoint that refuses our ceiling has
+        // told us its own, and sending nothing instead would hand the cut-off
+        // point back to the endpoint default this field exists to displace (#760).
+        let mut ceiling = MAX_COMPLETION_TOKENS;
+        let resp = loop {
+            body["max_tokens"] = json!(ceiling);
+            let resp = self
+                .request("/chat/completions")
+                .json(&body)
+                .send()
+                .await
+                .map_err(Unreachable)?;
+            let status = resp.status();
+            let retry_after = retry_after_of(resp.headers());
+            if status.is_success() {
+                break resp;
+            }
+            let raw = resp.text().await.map_err(Unreachable)?;
+            let parsed = serde_json::from_str(&raw).unwrap_or_default();
+            if status == reqwest::StatusCode::BAD_REQUEST && ceiling == MAX_COMPLETION_TOKENS {
+                if let Some(lower) = stated_completion_ceiling(&err_detail(&parsed, &raw), ceiling)
+                {
+                    ceiling = lower;
+                    continue;
+                }
+            }
+            return Err(failure("LLM", status, retry_after, &parsed, &raw));
+        };
         let mut bytes = resp.bytes_stream();
         let (mut buf, mut answer) = (Vec::new(), String::new());
         let (mut saw_frame, mut ended) = (false, false);
@@ -1007,6 +1024,34 @@ fn says_out_of_credit(body: &serde_json::Value) -> bool {
         .any(|v| v == "insufficient_quota")
 }
 
+/// The ceiling the endpoint says it has, read out of the 400 it refused us with (#891).
+///
+/// `MAX_COMPLETION_TOKENS` is deliberately above the largest completion this
+/// path has ever measured, so that it can never become a reasoning cap. A model
+/// whose own completion limit sits below that number rejects the request
+/// outright instead of clamping it, and every chunk fails: gpt-4o-mini caps at
+/// 16,384 and answers `max_tokens is too large: 65536`.
+///
+/// Reading the number back is free-text matching, which `says_out_of_credit`
+/// deliberately avoids, and the reason it is acceptable here is that there is no
+/// structured carrier for the limit and the failure is one-directional: a
+/// reworded message parses to `None` and the caller returns exactly the error it
+/// returns today. It can only ever lower a ceiling, never raise one.
+///
+/// Every integer in the message is a candidate because the wording differs per
+/// vendor; the ones at or above what we sent are the echo of our own request
+/// ("whereas you provided 65536"), so the largest of the rest is the ceiling.
+fn stated_completion_ceiling(detail: &str, sent: u32) -> Option<u32> {
+    if !detail.contains("max_tokens") && !detail.contains("max_completion_tokens") {
+        return None;
+    }
+    detail
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|token| token.parse::<u32>().ok())
+        .filter(|found| *found > 0 && *found < sent)
+        .max()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1110,6 +1155,52 @@ mod tests {
             socket.shutdown().await.unwrap();
         });
         (addr, server, rx)
+    }
+
+    // Two answers in order, both requests captured: the retry is only observable
+    // as a second request, so one-shot servers cannot see it.
+    async fn two_http_responses(
+        first: (&str, &str, &str),
+        second: (&str, &str, &str),
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<Vec<String>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let answers = [first, second]
+            .map(|(status, content_type, body)| {
+                (
+                    status.to_string(),
+                    content_type.to_string(),
+                    body.to_string(),
+                )
+            })
+            .to_vec();
+        let server = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for (status, content_type, body) in answers {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                seen.push(read_request(&mut socket).await);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+            let _ = tx.send(seen);
+        });
+        (addr, server, rx)
+    }
+
+    fn sent_max_tokens(request: &str) -> serde_json::Value {
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").expect("请求该有 body").1)
+                .expect("请求体是 JSON");
+        body["max_tokens"].clone()
     }
 
     // HTTP 分块可以断在 UTF-8 字符中间，与 SSE 帧边界无关。
@@ -1451,6 +1542,77 @@ data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"stop\"
             .expect_err("没有帧该是错误");
         server.await.unwrap();
         assert!(format!("{err:#}").contains("no frames"), "{err:#}");
+    }
+
+    /// A model whose ceiling is below ours is retried at its own, not failed (#891).
+    ///
+    /// The old behaviour was one 400 per chunk and an extraction that produced
+    /// nothing, because `MAX_COMPLETION_TOKENS` sits above what gpt-4o-mini will
+    /// accept and the endpoint refuses rather than clamps.
+    #[tokio::test]
+    async fn a_ceiling_the_endpoint_refuses_is_retried_at_the_one_it_states() {
+        let refusal = r#"{"error":{"message":"max_tokens is too large: 65536. This model supports at most 16384 completion tokens, whereas you provided 65536.","type":"invalid_request_error","param":"max_tokens"}}"#;
+        let answer = [
+            r#"data: {"choices":[{"delta":{"content":"{\"e\":[]}"}}]}"#,
+            r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n\n");
+        let (addr, server, requests) = two_http_responses(
+            ("400 Bad Request", "application/json", refusal),
+            ("200 OK", "text/event-stream", &answer),
+        )
+        .await;
+
+        let reply = client_at(addr)
+            .chat_at_streaming(
+                &[ChatMessage {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                Some(0.0),
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        let sent = requests.await.unwrap();
+        assert_eq!(sent.len(), 2, "the refusal must be retried, not surfaced");
+        assert_eq!(
+            sent_max_tokens(&sent[0]),
+            json!(MAX_COMPLETION_TOKENS),
+            "the first attempt still asks for the ceiling that is ours"
+        );
+        assert_eq!(
+            sent_max_tokens(&sent[1]),
+            json!(16_384),
+            "the retry asks for the ceiling the endpoint stated, not a guess"
+        );
+        assert_eq!(reply.text, r#"{"e":[]}"#);
+    }
+
+    /// A 400 about anything else is still a 400, and is not retried.
+    #[tokio::test]
+    async fn a_refusal_that_names_no_ceiling_is_not_retried() {
+        let refusal = r#"{"error":{"message":"Invalid value for 'temperature': must be <= 2","type":"invalid_request_error","param":"temperature"}}"#;
+        let (addr, server, request) =
+            an_http_response_capturing("400 Bad Request", "application/json", refusal).await;
+
+        let failed = client_at(addr)
+            .chat_at_streaming(
+                &[ChatMessage {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                Some(0.0),
+            )
+            .await;
+        server.await.unwrap();
+        request.await.unwrap();
+
+        let err = failed.expect_err("an unrelated 400 must reach the caller");
+        assert!(err.to_string().contains("temperature"), "{err}");
     }
 
     /// 上限归我们，被截断这件事说得出来（#760）。
